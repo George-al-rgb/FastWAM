@@ -16,7 +16,7 @@ model:
 EVALUATION:
   task_suite_name: libero_spatial
   task_id: 0
-  num_trials: 50
+  num_trials: 10
   output_dir: ./evaluate_results/libero/${hydra:runtime.choices.task}/${now:%Y%m%d_%H%M%S}
 
   # Runtime behavior

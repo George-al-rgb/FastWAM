@@ -1,0 +1,3 @@
+[submodule "third_party/drifting"]
+	path = third_party/drifting
+	url = https://github.com/lambertae/drifting.git

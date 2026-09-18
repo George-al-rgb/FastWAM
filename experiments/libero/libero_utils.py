@@ -25,7 +25,7 @@ def get_libero_env(task, resolution, seed, env_num=1):
         / task.bddl_file
     )
     env_args = {
-        "bddl_file_name": task_bddl_file,
+        "bddl_file_name": str(task_bddl_file),
         "camera_heights": resolution,
         "camera_widths": resolution,
     }

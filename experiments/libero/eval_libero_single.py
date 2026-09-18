@@ -2,6 +2,7 @@ import json
 import inspect
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -730,12 +731,35 @@ def _run_task_to_file(
 
     task_suite = benchmark.get_benchmark_dict()[suite_name]()
     task = task_suite.get_task(task_id)
-    init_states_path = (
-        Path(get_libero_path("init_states"))
-        / task.problem_folder
-        / task.init_states_file
-    )
+    # LIBERO-plus uses variant task names (for example ``_table_1``) while
+    # keeping the corresponding initial-state file under the base task name.
+    # Resolve both conventions here and explicitly disable PyTorch's
+    # weights-only loader because these files contain NumPy state objects.
+    init_root = Path(get_libero_path("init_states"))
+    filename = str(task.init_states_file)
+    candidates = []
+    if "_add_" in filename or "_level" in filename:
+        candidates.append(init_root / "libero_newobj" / task.problem_folder / filename)
+    candidates.append(init_root / task.problem_folder / filename)
+    stem, suffix = filename.rsplit(".", 1)
+    if "_language_" in stem or "_view_" in stem or "_light_" in stem:
+        marker = next(
+            marker
+            for marker in ("_language_", "_view_", "_light_")
+            if marker in stem
+        )
+        candidates.append(
+            init_root / task.problem_folder / f"{stem.split(marker, 1)[0]}.{suffix}"
+        )
+    elif "_table_" in stem or "_tb_" in stem:
+        # The base task name may itself contain ``_table`` (e.g. from_table),
+        # so remove only the numeric perturbation suffix.
+        normalized = re.sub(r"_(?:table|tb)_\d+", "", filename)
+        candidates.append(init_root / task.problem_folder / normalized)
+    init_states_path = next((path for path in candidates if path.exists()), candidates[0])
     initial_states = torch.load(init_states_path, weights_only=False)
+    if "_add_" in filename or "_level" in filename:
+        initial_states = initial_states.reshape(1, -1)
     while len(initial_states) < int(task_cfg.EVALUATION.num_trials):
         initial_states.extend(
             initial_states[: int(task_cfg.EVALUATION.num_trials) - len(initial_states)]
