@@ -96,7 +96,7 @@ def _resize_tensor_to_shape(src: torch.Tensor, target_shape: tuple[int, ...]) ->
     return out.to(dtype=src.dtype)
 
 
-def _load_model_config(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _load_model_config(path: Path) -> tuple[dict[str, Any], dict[str, Any], Any]:
     cfg = OmegaConf.load(str(path))
     if "video_dit_config" not in cfg or "action_dit_config" not in cfg:
         raise ValueError(
@@ -116,10 +116,24 @@ def _load_model_config(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         print("[WARN] `action_dit_config.action_dim` is unresolved; defaulting to 7 for preprocessing.")
         action_cfg["action_dim"] = 7
 
-    for key in ["num_heads", "attn_head_dim", "num_layers", "text_dim", "freq_dim"]:
+    for key in ["num_heads", "attn_head_dim", "num_layers", "freq_dim"]:
         action_cfg[key] = _resolve_from_video_cfg(action_cfg.get(key), video_cfg)
 
     return video_cfg, action_cfg, cfg
+
+
+def _video_key_for_action_key(
+    action_key: str,
+    action_num_layers: int,
+    video_num_layers: int,
+) -> str:
+    if not action_key.startswith("blocks."):
+        return action_key
+
+    _, layer_text, suffix = action_key.split(".", 2)
+    action_layer = int(layer_text)
+    video_layer = video_num_layers - action_num_layers + action_layer
+    return f"blocks.{video_layer}.{suffix}"
 
 
 def _require_int_config(cfg: dict[str, Any], key: str) -> int:
@@ -160,10 +174,20 @@ def main() -> None:
     torch_dtype = _parse_dtype(args.dtype)
     redirect_common_files = _parse_bool(cfg.get("redirect_common_files", False))
 
-    int_fields = ["hidden_dim", "action_dim", "ffn_dim", "num_layers", "num_heads", "attn_head_dim", "text_dim", "freq_dim"]
+    int_fields = [
+        "hidden_dim",
+        "action_dim",
+        "ffn_dim",
+        "num_layers",
+        "num_heads",
+        "attn_head_dim",
+        "freq_dim",
+    ]
     for key in int_fields:
         action_cfg[key] = _require_int_config(action_cfg, key)
     action_cfg["eps"] = _require_float_config(action_cfg, "eps")
+    text_dim = _require_int_config(video_cfg, "text_dim")
+    action_cfg.pop("text_dim", None)
 
     print(f"[INFO] Loaded model config from {model_config_path}. "
           f"Preprocessing ActionDiT backbone with dtype={torch_dtype} on device={args.device}, "
@@ -175,6 +199,7 @@ def main() -> None:
         tokenizer_model_id=cfg.get("tokenizer_model_id", "Wan-AI/Wan2.1-T2V-1.3B"),
         redirect_common_files=redirect_common_files,
         dit_config=video_cfg,
+        load_text_encoder=False,
     )
     video_expert = components.dit
 
@@ -183,8 +208,13 @@ def main() -> None:
         raise ValueError("ActionDiT `num_heads` must match video expert for MoT mixed attention.")
     if int(action_cfg["attn_head_dim"]) != int(video_expert.attn_head_dim):
         raise ValueError("ActionDiT `attn_head_dim` must match video expert for MoT mixed attention.")
-    if int(action_cfg["num_layers"]) != int(len(video_expert.blocks)):
-        raise ValueError("ActionDiT `num_layers` must match video expert.")
+    action_num_layers = int(action_cfg["num_layers"])
+    video_num_layers = int(len(video_expert.blocks))
+    if action_num_layers > video_num_layers:
+        raise ValueError(
+            f"ActionDiT has {action_num_layers} layers but the video expert has only "
+            f"{video_num_layers}."
+        )
 
     action_state = action_expert.state_dict()
     video_state = video_expert.state_dict()
@@ -194,9 +224,16 @@ def main() -> None:
     copied = 0
     interpolated = 0
     for key in sorted(backbone_keys):
-        if key not in video_state:
-            raise ValueError(f"Key `{key}` not found in video expert state dict.")
-        src = video_state[key]
+        source_key = _video_key_for_action_key(
+            action_key=key,
+            action_num_layers=action_num_layers,
+            video_num_layers=video_num_layers,
+        )
+        if source_key not in video_state:
+            raise ValueError(
+                f"Key `{source_key}` for action key `{key}` was not found in video expert state dict."
+            )
+        src = video_state[source_key]
         target = action_state[key]
         if tuple(src.shape) == tuple(target.shape):
             value = src
@@ -214,6 +251,7 @@ def main() -> None:
             "skip_prefixes": list(ActionDiT.ACTION_BACKBONE_SKIP_PREFIXES),
             "alpha_scaling": bool(apply_alpha_scaling),
             "interpolation": "sequential_1d_linear_align_corners_true",
+            "layer_mapping": "action_blocks[i]=video_blocks[video_num_layers-action_num_layers+i]",
         },
         "backbone_state_dict": backbone_state_dict,
         "meta": {
@@ -222,9 +260,10 @@ def main() -> None:
             "num_layers": int(action_cfg["num_layers"]),
             "num_heads": int(action_cfg["num_heads"]),
             "attn_head_dim": int(action_cfg["attn_head_dim"]),
-            "text_dim": int(action_cfg["text_dim"]),
+            "text_dim": text_dim,
             "freq_dim": int(action_cfg["freq_dim"]),
             "eps": float(action_cfg["eps"]),
+            "source_num_layers": video_num_layers,
         },
     }
     torch.save(payload, str(output_path))

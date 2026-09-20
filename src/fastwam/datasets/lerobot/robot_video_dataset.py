@@ -229,6 +229,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             task = self.override_instruction
         instruction = DEFAULT_PROMPT.format(task=task)
 
+        action_dim_is_pad = sample.get("action_dim_is_pad", None)
         data = {
             "video": video,
             "action": action,
@@ -238,6 +239,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
         }
+        if action_dim_is_pad is not None:
+            data["action_dim_is_pad"] = action_dim_is_pad
         if self.use_text_embed_cache:
             context, context_mask = self._get_cached_text_context(instruction)
             # NOTE: to keep consistent with wan2.2's behavior

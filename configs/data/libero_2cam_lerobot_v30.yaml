@@ -1,17 +1,14 @@
 train:
   _target_: fastwam.datasets.lerobot3.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
-    - ./data/lerobot_v30/libero_spatial_no_noops_lerobot
-    - ./data/lerobot_v30/libero_object_no_noops_lerobot
-    - ./data/lerobot_v30/libero_goal_no_noops_lerobot
-    - ./data/lerobot_v30/libero_10_no_noops_lerobot
+    - ./data/lerobot_v30/libero
   shape_meta:
     images:
       - key: image
-        raw_shape: [3, 512, 512]
+        raw_shape: [3, 256, 256]
         shape: [3, 224, 224]
-      - key: wrist_image
-        raw_shape: [3, 512, 512]
+      - key: image2
+        raw_shape: [3, 256, 256]
         shape: [3, 224, 224]
     action:
       - key: default

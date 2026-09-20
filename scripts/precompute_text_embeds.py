@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import hydra
+import pandas as pd
 import torch
 import torch.distributed as dist
 from omegaconf import DictConfig, ListConfig
@@ -118,23 +119,25 @@ def _read_unique_prompts(dataset_dirs: list[str]) -> list[str]:
 
     for ds_dir in dataset_dirs:
         tasks_path = Path(ds_dir) / "meta" / "tasks.jsonl"
-        if not tasks_path.exists():
-            raise FileNotFoundError(f"Missing tasks file: {tasks_path}")
+        if tasks_path.exists():
+            with tasks_path.open("r", encoding="utf-8") as f:
+                tasks = [json.loads(line)["task"] for line in f if line.strip()]
+        else:
+            tasks_path = Path(ds_dir) / "meta" / "tasks.parquet"
+            if not tasks_path.exists():
+                raise FileNotFoundError(f"Missing tasks file under {Path(ds_dir) / 'meta'}")
+            table = pd.read_parquet(tasks_path)
+            if "task" in table.columns:
+                tasks = table["task"].tolist()
+            else:
+                tasks = table.index.tolist()
 
-        with tasks_path.open("r", encoding="utf-8") as f:
-            for line_idx, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                if "task" not in record:
-                    raise KeyError(f"Missing `task` field at {tasks_path}:{line_idx}")
-                task = str(record["task"])
-                prompt = DEFAULT_PROMPT.format(task=task)
-                total_task_rows += 1
-                if prompt not in seen:
-                    seen.add(prompt)
-                    prompts.append(prompt)
+        for task in tasks:
+            prompt = DEFAULT_PROMPT.format(task=str(task))
+            total_task_rows += 1
+            if prompt not in seen:
+                seen.add(prompt)
+                prompts.append(prompt)
 
     logger.info(
         "Loaded %d task rows from %d datasets, deduplicated to %d prompts.",

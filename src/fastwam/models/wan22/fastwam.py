@@ -9,20 +9,20 @@ from fastwam.utils.logging_config import get_logger
 
 from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
-from .mot import MoT
+from .dot import DoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 
 logger = get_logger(__name__)
 
 
 class FastWAM(torch.nn.Module):
-    """MoT world model with video/action experts."""
+    """DoT world model with video/action experts."""
 
     def __init__(
         self,
         video_expert,
         action_expert: ActionDiT,
-        mot: MoT,
+        dot: DoT,
         vae,
         text_encoder=None,
         tokenizer=None,
@@ -43,9 +43,9 @@ class FastWAM(torch.nn.Module):
         super().__init__()
         self.video_expert = video_expert
         self.action_expert = action_expert
-        self.mot = mot
+        self.dot = dot
         # Keep trainer compatibility: optimizer and freeze logic use `model.dit`.
-        self.dit = self.mot
+        self.dit = self.dot
 
         self.vae = vae
         self.text_encoder = text_encoder
@@ -86,7 +86,7 @@ class FastWAM(torch.nn.Module):
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
         self.compile_training_denoise = bool(compile_training_denoise)
-        self.mot.compile_training_layers = self.compile_training_denoise
+        self.dot.compile_training_layers = self.compile_training_denoise
 
         self.to(self.device)
 
@@ -141,14 +141,7 @@ class FastWAM(torch.nn.Module):
             device=device,
             torch_dtype=torch_dtype,
         )
-        if int(action_expert.num_heads) != int(video_expert.num_heads):
-            raise ValueError("ActionDiT `num_heads` must match video expert for MoT mixed attention.")
-        if int(action_expert.attn_head_dim) != int(video_expert.attn_head_dim):
-            raise ValueError("ActionDiT `attn_head_dim` must match video expert for MoT mixed attention.")
-        if int(len(action_expert.blocks)) != int(len(video_expert.blocks)):
-            raise ValueError("ActionDiT `num_layers` must match video expert.")
-
-        mot = MoT(
+        dot = DoT(
             mixtures={"video": video_expert, "action": action_expert},
             mot_checkpoint_mixed_attn=mot_checkpoint_mixed_attn,
         )
@@ -156,7 +149,7 @@ class FastWAM(torch.nn.Module):
         model = cls(
             video_expert=video_expert,
             action_expert=action_expert,
-            mot=mot,
+            dot=dot,
             vae=components.vae,
             text_encoder=components.text_encoder,
             tokenizer=components.tokenizer,
@@ -187,7 +180,7 @@ class FastWAM(torch.nn.Module):
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.mot.to(*args, **kwargs)
+        self.dot.to(*args, **kwargs)
         if self.text_encoder is not None:
             self.text_encoder.to(*args, **kwargs)
         self.vae.to(*args, **kwargs)
@@ -324,6 +317,18 @@ class FastWAM(torch.nn.Module):
                     f"got {tuple(action_is_pad.shape)} vs expected ({batch_size}, {action_horizon})"
                 )
 
+        action_dim_is_pad = sample.get("action_dim_is_pad", None)
+        if action_dim_is_pad is not None:
+            if action_dim_is_pad.ndim != 2:
+                raise ValueError(
+                    f"`sample['action_dim_is_pad']` must be 2D [B, D], got shape {tuple(action_dim_is_pad.shape)}"
+                )
+            if action_dim_is_pad.shape[0] != batch_size or action_dim_is_pad.shape[1] != action.shape[2]:
+                raise ValueError(
+                    "`sample['action_dim_is_pad']` shape mismatch: "
+                    f"got {tuple(action_dim_is_pad.shape)} vs expected ({batch_size}, {action.shape[2]})"
+                )
+
         image_is_pad = sample.get("image_is_pad", None)
         if image_is_pad is not None:
             if image_is_pad.ndim != 2:
@@ -375,10 +380,13 @@ class FastWAM(torch.nn.Module):
                 context_mask=context_mask,
                 proprio=proprio.to(device=self.device, dtype=self.torch_dtype),
             )
+        action_target = action.to(device=self.device, dtype=torch.float32, non_blocking=True)
         action = action.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
 
         if action_is_pad is not None:
             action_is_pad = action_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        if action_dim_is_pad is not None:
+            action_dim_is_pad = action_dim_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
         if image_is_pad is not None:
             image_is_pad = image_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
 
@@ -389,7 +397,9 @@ class FastWAM(torch.nn.Module):
             "first_frame_latents": first_frame_latents,
             "fuse_vae_embedding_in_latents": fuse_flag,
             "action": action,
+            "action_target": action_target,
             "action_is_pad": action_is_pad,
+            "action_dim_is_pad": action_dim_is_pad,
             "image_is_pad": image_is_pad,
         }
 
@@ -490,28 +500,18 @@ class FastWAM(torch.nn.Module):
         )
         (
             action_tokens,
-            _t_action,
-            t_mod_action,
-            context_action,
-            context_mask_action,
             freqs_action,
         ) = self.action_expert.prepare(
             action_tokens=latents_action,
-            timestep=timestep_action,
-            context=context,
-            context_mask=context_mask,
         )
-        video_tokens, action_tokens = self.mot.forward_joint_core(
+        video_tokens, action_tokens = self.dot.forward_joint_core(
             video_tokens=video_tokens,
             action_tokens=action_tokens,
             video_freqs=freqs_video,
             action_freqs=freqs_action,
             video_t_mod=t_mod_video,
-            action_t_mod=t_mod_action,
             video_context=context_video,
             video_context_mask=context_mask_video,
-            action_context=context_action,
-            action_context_mask=context_mask_action,
             attention_mask=attention_mask,
         )
         return (
@@ -661,9 +661,6 @@ class FastWAM(torch.nn.Module):
         )
         action_pre = self.action_expert.pre_dit(
             action_tokens=latents_action,
-            timestep=timestep_action,
-            context=context,
-            context_mask=context_mask,
         )
 
         attention_mask = self._build_mot_attention_mask(
@@ -672,32 +669,17 @@ class FastWAM(torch.nn.Module):
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
             device=video_pre["tokens"].device,
         )
-        tokens_out = self.mot(
-            embeds_all={
-                "video": video_pre["tokens"],
-                "action": action_pre["tokens"],
-            },
+        _, action_tokens = self.dot.forward_joint_core(
+            video_tokens=video_pre["tokens"],
+            action_tokens=action_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            action_freqs=action_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            video_context=video_pre["context"],
+            video_context_mask=video_pre["context_mask"],
             attention_mask=attention_mask,
-            freqs_all={
-                "video": video_pre["freqs"],
-                "action": action_pre["freqs"],
-            },
-            context_all={
-                "video": {
-                    "context": video_pre["context"],
-                    "mask": video_pre["context_mask"],
-                },
-                "action": {
-                    "context": action_pre["context"],
-                    "mask": action_pre["context_mask"],
-                },
-            },
-            t_mod_all={
-                "video": video_pre["t_mod"],
-                "action": action_pre["t_mod"],
-            },
         )
-        pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
+        pred_action = self.action_expert.post_dit(action_tokens, action_pre)
         return pred_action
 
     def _denoise_action_with_video_cache(
@@ -708,64 +690,25 @@ class FastWAM(torch.nn.Module):
         context_mask: torch.Tensor,
         video_cache_k: list[torch.Tensor],
         video_cache_v: list[torch.Tensor],
+        video_freqs: torch.Tensor,
         action_attention_mask: torch.Tensor,
+        fused_video_k: Optional[torch.Tensor] = None,
+        fused_video_v: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        (
-            action_tokens,
-            _t,
-            action_t_mod,
-            action_context,
-            action_context_mask,
-            action_freqs,
-        ) = self.action_expert.prepare(
+        action_tokens, action_freqs = self.action_expert.prepare(
             action_tokens=latents_action,
-            timestep=timestep_action,
-            context=context,
-            context_mask=context_mask,
         )
-        action_tokens = self.mot.forward_action_with_video_cache_tensor(
+        action_tokens = self.dot.forward_action_with_video_cache_tensor(
             action_tokens=action_tokens,
             action_freqs=action_freqs,
-            action_t_mod=action_t_mod,
-            action_context=action_context,
-            action_context_mask=action_context_mask,
             video_cache_k=video_cache_k,
             video_cache_v=video_cache_v,
+            video_freqs=video_freqs,
             action_attention_mask=action_attention_mask,
+            fused_video_k=fused_video_k,
+            fused_video_v=fused_video_v,
         )
         return self.action_expert.post(action_tokens)
-
-    @torch.no_grad()
-    def _predict_action_noise_with_cache(
-        self,
-        latents_action: torch.Tensor,
-        timestep_action: torch.Tensor,
-        context: torch.Tensor,
-        context_mask: torch.Tensor,
-        video_kv_cache: list[dict[str, torch.Tensor]],
-        attention_mask: torch.Tensor,
-        video_seq_len: int,
-    ) -> torch.Tensor:
-        """Legacy dictionary-cache path retained for the optional IDM variant."""
-        action_pre = self.action_expert.pre_dit(
-            action_tokens=latents_action,
-            timestep=timestep_action,
-            context=context,
-            context_mask=context_mask,
-        )
-        action_tokens = self.mot.forward_action_with_video_cache(
-            action_tokens=action_pre["tokens"],
-            action_freqs=action_pre["freqs"],
-            action_t_mod=action_pre["t_mod"],
-            action_context_payload={
-                "context": action_pre["context"],
-                "mask": action_pre["context_mask"],
-            },
-            video_kv_cache=video_kv_cache,
-            attention_mask=attention_mask,
-            video_seq_len=video_seq_len,
-        )
-        return self.action_expert.post_dit(action_tokens, action_pre)
 
     @torch.no_grad()
     def infer_joint(
@@ -1100,7 +1043,7 @@ class FastWAM(torch.nn.Module):
         if compile_action_infer:
             if not hasattr(self, "_prefill_video_cache_compiled"):
                 self._prefill_video_cache_compiled = torch.compile(
-                    self.mot.prefill_video_cache_tensor,
+                    self.dot.prefill_video_cache_tensor,
                     mode="reduce-overhead",
                     fullgraph=True,
                 )
@@ -1113,7 +1056,7 @@ class FastWAM(torch.nn.Module):
             prefill_video_cache = self._prefill_video_cache_compiled
             denoise_action_with_video_cache = self._denoise_action_with_video_cache_compiled
         else:
-            prefill_video_cache = self.mot.prefill_video_cache_tensor
+            prefill_video_cache = self.dot.prefill_video_cache_tensor
             denoise_action_with_video_cache = self._denoise_action_with_video_cache
         if compile_action_infer:
             torch.compiler.cudagraph_mark_step_begin()
@@ -1129,6 +1072,14 @@ class FastWAM(torch.nn.Module):
             # Inductor reduce-overhead may return graph-owned buffers that are overwritten on replay.
             video_cache_k = [cache.clone() for cache in video_cache_k]
             video_cache_v = [cache.clone() for cache in video_cache_v]
+
+        fused_video_kv = self.dot.kv_fusion(
+            video_cache_k=video_cache_k,
+            video_cache_v=video_cache_v,
+            video_freqs=video_freqs,
+        )
+        fused_video_k = fused_video_kv["k"]
+        fused_video_v = fused_video_kv["v"]
 
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
             num_inference_steps=num_inference_steps,
@@ -1148,7 +1099,10 @@ class FastWAM(torch.nn.Module):
                 context_mask=context_mask,
                 video_cache_k=video_cache_k,
                 video_cache_v=video_cache_v,
+                video_freqs=video_freqs,
                 action_attention_mask=action_attention_mask,
+                fused_video_k=fused_video_k,
+                fused_video_v=fused_video_v,
             )
             pred_action = pred_action_posi
 
@@ -1198,7 +1152,7 @@ class FastWAM(torch.nn.Module):
 
     def save_checkpoint(self, path, optimizer=None, step=None):
         payload = {
-            "mot": self.mot.state_dict(),
+            "dot": self.dot.state_dict(),
             "step": step,
             "torch_dtype": str(self.torch_dtype),
         }
@@ -1210,13 +1164,13 @@ class FastWAM(torch.nn.Module):
 
     def load_checkpoint(self, path, optimizer=None):
         payload = torch.load(path, map_location="cpu")
-        if "mot" in payload:
-            self.mot.load_state_dict(payload["mot"], strict=False)
+        if "dot" in payload:
+            self.dot.load_state_dict(payload["dot"], strict=False)
         elif "dit" in payload:
             logger.warning("Loading legacy `dit` checkpoint into video expert only.")
             self.video_expert.load_state_dict(payload["dit"], strict=False)
         else:
-            raise ValueError(f"Checkpoint missing both `mot` and `dit` keys: {path}")
+            raise ValueError(f"Checkpoint missing both `dot` and `dit` keys: {path}")
         if self.proprio_encoder is not None:
             if "proprio_encoder" in payload:
                 self.proprio_encoder.load_state_dict(payload["proprio_encoder"], strict=True)

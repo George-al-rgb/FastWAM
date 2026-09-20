@@ -669,11 +669,8 @@ class MoT(nn.Module):
         video_freqs: torch.Tensor,
         action_freqs: torch.Tensor,
         video_t_mod: torch.Tensor,
-        action_t_mod: torch.Tensor,
         video_context: torch.Tensor,
         video_context_mask: torch.Tensor,
-        action_context: torch.Tensor,
-        action_context_mask: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.training and self.compile_training_layers and not hasattr(self, "_compiled_joint_layer"):
@@ -698,11 +695,8 @@ class MoT(nn.Module):
                 video_freqs=video_freqs,
                 action_freqs=action_freqs,
                 video_t_mod=video_t_mod,
-                action_t_mod=action_t_mod,
                 video_context=video_context,
                 video_context_mask=video_context_mask,
-                action_context=action_context,
-                action_context_mask=action_context_mask,
                 attention_mask=attention_mask,
             )
         return x_video, x_action

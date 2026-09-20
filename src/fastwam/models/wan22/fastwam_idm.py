@@ -147,7 +147,7 @@ class FastWAMIDM(FastWAMJoint):
             device=merged_video_tokens.device,
         )
 
-        merged_video_out, action_out = self.mot.forward_joint_core(
+        merged_video_out, action_out = self.dot.forward_joint_core(
             video_tokens=merged_video_tokens,
             action_tokens=action_tokens,
             video_freqs=merged_video_freqs,
@@ -539,7 +539,7 @@ class FastWAMIDM(FastWAMJoint):
         if compile_action_infer:
             if not hasattr(self, "_prefill_video_cache_compiled"):
                 self._prefill_video_cache_compiled = torch.compile(
-                    self.mot.prefill_video_cache_tensor,
+                    self.dot.prefill_video_cache_tensor,
                     fullgraph=True,
                 )
             if not hasattr(self, "_denoise_action_with_video_cache_compiled"):
@@ -550,7 +550,7 @@ class FastWAMIDM(FastWAMJoint):
             prefill_video_cache = self._prefill_video_cache_compiled
             denoise_action_with_video_cache = self._denoise_action_with_video_cache_compiled
         else:
-            prefill_video_cache = self.mot.prefill_video_cache_tensor
+            prefill_video_cache = self.dot.prefill_video_cache_tensor
             denoise_action_with_video_cache = self._denoise_action_with_video_cache
         video_cache_k, video_cache_v = prefill_video_cache(
             video_tokens=video_cond_tokens,

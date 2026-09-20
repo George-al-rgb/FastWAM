@@ -160,6 +160,101 @@ def create_fastwam(
     )
 
 
+def create_fastwam_drifting(
+    model_id: str,
+    tokenizer_model_id: str,
+    video_dit_config,
+    tokenizer_max_len: int = 512,
+    load_text_encoder: bool = True,
+    proprio_dim: int | None = None,
+    action_dit_config=None,
+    action_dit_pretrained_path: str | None = None,
+    skip_dit_load_from_pretrain: bool = False,
+    video_scheduler=None,
+    action_scheduler=None,
+    drifting=None,
+    loss=None,
+    mot_checkpoint_mixed_attn: bool = False,
+    compile_training_denoise: bool = False,
+    redirect_common_files: bool = True,
+    model_dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
+):
+    """Create the additive DriftingVLA training/inference path.
+
+    ``action_scheduler`` is accepted for config compatibility with the base
+    model, but the direct action branch never samples or steps it.
+    """
+    from .models.wan22.fastwam_drifting import FastDriftingWAM
+
+    if isinstance(video_dit_config, DictConfig):
+        video_dit_config = OmegaConf.to_container(video_dit_config, resolve=True)
+    if not isinstance(video_dit_config, dict):
+        raise ValueError(f"`video_dit_config` must resolve to a dict, got {type(video_dit_config)}")
+
+    if isinstance(action_dit_config, DictConfig):
+        action_dit_config = OmegaConf.to_container(action_dit_config, resolve=True)
+    if not isinstance(action_dit_config, dict):
+        raise ValueError(f"`action_dit_config` must resolve to a dict, got {type(action_dit_config)}")
+
+    if isinstance(video_scheduler, DictConfig):
+        video_scheduler = OmegaConf.to_container(video_scheduler, resolve=True)
+    if video_scheduler is None:
+        video_scheduler = {}
+    if not isinstance(video_scheduler, dict):
+        raise ValueError(f"`video_scheduler` must be dict-like, got {type(video_scheduler)}")
+
+    if isinstance(action_scheduler, DictConfig):
+        action_scheduler = OmegaConf.to_container(action_scheduler, resolve=True)
+    if action_scheduler is None:
+        action_scheduler = {}
+    if not isinstance(action_scheduler, dict):
+        raise ValueError(f"`action_scheduler` must be dict-like, got {type(action_scheduler)}")
+
+    if isinstance(drifting, DictConfig):
+        drifting = OmegaConf.to_container(drifting, resolve=True)
+    if drifting is None:
+        drifting = {}
+    if not isinstance(drifting, dict):
+        raise ValueError(f"`drifting` must be dict-like, got {type(drifting)}")
+
+    if isinstance(loss, DictConfig):
+        loss = OmegaConf.to_container(loss, resolve=True)
+    if loss is None:
+        loss = {}
+    if not isinstance(loss, dict):
+        raise ValueError(f"`loss` must be dict-like, got {type(loss)}")
+
+    model = FastDriftingWAM.from_wan22_pretrained(
+        device=device,
+        torch_dtype=model_dtype,
+        model_id=model_id,
+        tokenizer_model_id=tokenizer_model_id,
+        tokenizer_max_len=int(tokenizer_max_len),
+        load_text_encoder=bool(load_text_encoder),
+        proprio_dim=(None if proprio_dim is None else int(proprio_dim)),
+        redirect_common_files=bool(redirect_common_files),
+        video_dit_config=video_dit_config,
+        action_dit_config=action_dit_config,
+        action_dit_pretrained_path=action_dit_pretrained_path,
+        skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
+        mot_checkpoint_mixed_attn=bool(mot_checkpoint_mixed_attn),
+        video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
+        video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
+        video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
+        # These values are retained only for the base class constructor.  The
+        # DriftingVLA action path does not call either action scheduler.
+        action_train_shift=float(action_scheduler.get("train_shift", 1.0)),
+        action_infer_shift=float(action_scheduler.get("infer_shift", 1.0)),
+        action_num_train_timesteps=int(action_scheduler.get("num_train_timesteps", 1000)),
+        loss_lambda_video=float(loss.get("lambda_video", 1.0)),
+        loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        compile_training_denoise=bool(compile_training_denoise),
+    )
+    model.configure_drifting(drifting)
+    return model
+
+
 def create_fastwam_joint(
     model_id: str,
     tokenizer_model_id: str,

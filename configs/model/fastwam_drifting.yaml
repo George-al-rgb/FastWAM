@@ -1,4 +1,4 @@
-_target_: fastwam.runtime.create_fastwam
+_target_: fastwam.runtime.create_fastwam_drifting
 model_id: Wan-AI/Wan2.2-TI2V-5B
 tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
 tokenizer_max_len: 128
@@ -7,7 +7,8 @@ proprio_dim: ${data.train.processor.proprio_output_dim}
 redirect_common_files: true
 mot_checkpoint_mixed_attn: false
 compile_training_denoise: false
-action_dit_pretrained_path: checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt
+
+action_dit_pretrained_path: checkpoints/ActionDiT_last_layer_Wan22_1layer.pt
 skip_dit_load_from_pretrain: false
 
 video_dit_config:
@@ -28,7 +29,7 @@ video_dit_config:
   require_vae_embedding: false
   fuse_vae_embedding_in_latents: true
   use_gradient_checkpointing: ${model.mot_checkpoint_mixed_attn}
-  video_attention_mask_mode: "first_frame_causal" # default
+  video_attention_mask_mode: "first_frame_causal"
   action_conditioned: false
   action_dim: ${data.train.processor.action_output_dim}
   action_group_causal_mask_mode: "group_diagonal"
@@ -49,10 +50,15 @@ video_scheduler:
   infer_shift: 5.0
   num_train_timesteps: 1000
 
-action_scheduler:
-  train_shift: 1.0
-  infer_shift: 1.0
-  num_train_timesteps: 1000
+drifting:
+  num_siblings: 8
+  bandwidths: [0.02, 0.05, 0.2]
+  eps_distance: 1.0e-06
+  eps_affinity: 1.0e-06
+  eps_force: 1.0e-06
+  beta: 0.2
+  metric_path: data/fastwam_release/fdwam_action_metric.pt
 
 loss:
+  lambda_video: 1.0
   lambda_action: 1.0

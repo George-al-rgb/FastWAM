@@ -41,11 +41,14 @@ class Wan22Trainer:
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.log_every = int(cfg.log_every)
         self.save_every = int(cfg.save_every)
+        self.save_epochs = {int(epoch) for epoch in (cfg.get("save_epochs", []) or [])}
+        self.save_final_checkpoint = bool(cfg.get("save_final_checkpoint", True))
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
         self.max_grad_norm = float(cfg.max_grad_norm)
         self.seed = int(cfg.seed)
+        self.save_training_state = bool(cfg.get("save_training_state", True))
         
         self.resume = cfg.resume
         self.mixed_precision = str(cfg.mixed_precision).strip().lower()
@@ -62,16 +65,26 @@ class Wan22Trainer:
             step_scheduler_with_optimizer=False,
         )
         
+        deepspeed_plugin = self.accelerator.state.deepspeed_plugin
+        zero_stage = "none"
+        if deepspeed_plugin is not None:
+            zero_stage = deepspeed_plugin.deepspeed_config.get("zero_optimization", {}).get("stage", "unknown")
         logger.info(
             "Accelerate training: distributed_type=%s zero_stage=%s world_size=%d process_index=%d cfg_mixed_precision=%s accelerator_mixed_precision=%s grad_accum=%d grad_clip=%.4f",
             self.accelerator.distributed_type,
-            self.accelerator.state.deepspeed_plugin.deepspeed_config.get("zero_optimization", {}).get("stage", "unknown"),
+            zero_stage,
             self.accelerator.num_processes,
             self.accelerator.process_index,
             self.mixed_precision,
             self.accelerator.mixed_precision,
             self.gradient_accumulation_steps,
             self.max_grad_norm,
+        )
+        logger.info(
+            "Batching: micro_batch=%d gradient_accumulation=%d effective_global_batch=%d",
+            self.batch_size,
+            self.gradient_accumulation_steps,
+            self.batch_size * self.gradient_accumulation_steps * self.accelerator.num_processes,
         )
         logger.info("using accelerator.device=%s", self.accelerator.device)
         worker_init_fn = set_global_seed(self.seed, get_worker_init_fn=True)
@@ -322,6 +335,7 @@ class Wan22Trainer:
         video = sample["video"]
         prompt = sample["prompt"]
         action = sample.get("action", None)
+        action_dim_is_pad = sample.get("action_dim_is_pad", None)
         proprio = sample.get("proprio", None)
         context = sample.get("context", None)
         context_mask = sample.get("context_mask", None)
@@ -364,6 +378,19 @@ class Wan22Trainer:
                 raise ValueError(f"`sample['action']` temporal dimension must be divisible by video frames-1={num_video_frames - 1}, got {action.shape[1]}")
             action_horizon = int(action.shape[1])
 
+        if action_dim_is_pad is not None:
+            if not isinstance(action_dim_is_pad, torch.Tensor):
+                raise TypeError(
+                    f"`sample['action_dim_is_pad']` must be a torch.Tensor, got {type(action_dim_is_pad)}"
+                )
+            if action_dim_is_pad.ndim == 1:
+                action_dim_is_pad = action_dim_is_pad.unsqueeze(0)
+            if action_dim_is_pad.ndim != 2 or action_dim_is_pad.shape[0] != video.shape[0]:
+                raise ValueError(
+                    "`sample['action_dim_is_pad']` must have shape [B, D], "
+                    f"got {tuple(action_dim_is_pad.shape)}"
+                )
+
         proprio = None
         if "proprio" in sample:
             proprio = sample["proprio"]
@@ -390,6 +417,7 @@ class Wan22Trainer:
             "video": video,
             "prompt": prompt,
             "action": action,
+            "action_dim_is_pad": action_dim_is_pad,
             "proprio": proprio,
             "context": context,
             "context_mask": context_mask,
@@ -603,8 +631,8 @@ class Wan22Trainer:
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
 
-    def save_checkpoint(self):
-        step_tag = f"step_{self.global_step:06d}"
+    def save_checkpoint(self, tag: str | None = None):
+        step_tag = tag or f"step_{self.global_step:06d}"
 
         self.accelerator.wait_for_everyone()
         ckpt_path = None
@@ -612,12 +640,14 @@ class Wan22Trainer:
             ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
         self.accelerator.wait_for_everyone()
 
-        state_path = os.path.join(self.state_dir, step_tag)
-        ensure_dir(state_path)
-        self.accelerator.save_state(output_dir=state_path)
-        if self.accelerator.is_main_process:
-            self._save_trainer_state(state_path)
-        self.accelerator.wait_for_everyone()
+        state_path = None
+        if self.save_training_state:
+            state_path = os.path.join(self.state_dir, step_tag)
+            ensure_dir(state_path)
+            self.accelerator.save_state(output_dir=state_path)
+            if self.accelerator.is_main_process:
+                self._save_trainer_state(state_path)
+            self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
 
@@ -687,6 +717,16 @@ class Wan22Trainer:
                 self.epoch += 1
                 self.batch_in_epoch = 0
                 self.train_sampler.clear_resume_batch_offset()
+                if self.epoch in self.save_epochs:
+                    ckpt_info = self.save_checkpoint(tag=f"epoch_{self.epoch:03d}")
+                    if self.accelerator.is_main_process:
+                        logger.info(
+                            "[ckpt] epoch=%d step=%d weights=%s state=%s",
+                            self.epoch,
+                            self.global_step,
+                            ckpt_info["weights_path"],
+                            ckpt_info["state_path"],
+                        )
                 data_iter = iter(self.train_loader)
                 continue
 
@@ -793,7 +833,8 @@ class Wan22Trainer:
                             )
 
                     if self.global_step >= self.max_steps:
-                        ckpt_info = self.save_checkpoint()
+                        final_tag = "final" if self.save_final_checkpoint else None
+                        ckpt_info = self.save_checkpoint(tag=final_tag)
                         if self.accelerator.is_main_process:
                             logger.info(
                                 "[done] max_steps reached step=%d weights=%s state=%s",
@@ -803,7 +844,8 @@ class Wan22Trainer:
                             )
                         return
 
-        ckpt_info = self.save_checkpoint()
+        final_tag = "final" if self.save_final_checkpoint else None
+        ckpt_info = self.save_checkpoint(tag=final_tag)
         if self.accelerator.is_main_process:
             logger.info(
                 "[done] training finished step=%d weights=%s state=%s",
