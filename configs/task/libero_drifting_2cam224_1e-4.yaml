@@ -18,9 +18,9 @@ num_epochs: 10
 max_steps: null
 log_every: 10
 save_every: 0
-save_epochs: [5]
+save_epochs: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 save_final_checkpoint: true
-save_training_state: false
+save_training_state: true
 eval_every: 0
 
 gradient_accumulation_steps: 4

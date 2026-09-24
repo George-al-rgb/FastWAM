@@ -56,8 +56,8 @@ drifting:
   eps_distance: 1.0e-06
   eps_affinity: 1.0e-06
   eps_force: 1.0e-06
-  beta: 0.2
-  metric_path: data/fastwam_release/fdwam_action_metric.pt
+  beta: 0.0
+  metric_path: null
 
 loss:
   lambda_video: 1.0

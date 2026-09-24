@@ -30,9 +30,23 @@ class DoT(nn.Module):
         self.video_attn_dim = self.video_expert.num_heads * self.video_expert.attn_head_dim
         self.action_attn_dim = self.action_expert.num_heads * self.action_expert.attn_head_dim
 
+        action_reference = next(self.action_expert.parameters())
+
         # Remap the video KV channel space into the action-head attention space.
-        self.kv_k_proj = nn.Linear(self.video_attn_dim, self.action_attn_dim, bias=False)
-        self.kv_v_proj = nn.Linear(self.video_attn_dim, self.action_attn_dim, bias=False)
+        self.kv_k_proj = nn.Linear(
+            self.video_attn_dim,
+            self.action_attn_dim,
+            bias=False,
+            device=action_reference.device,
+            dtype=action_reference.dtype,
+        )
+        self.kv_v_proj = nn.Linear(
+            self.video_attn_dim,
+            self.action_attn_dim,
+            bias=False,
+            device=action_reference.device,
+            dtype=action_reference.dtype,
+        )
 
         # One layer-mixing matrix per action head. The same matrix is used for K and V.
         self.layer_mix = nn.Parameter(
@@ -43,6 +57,8 @@ class DoT(nn.Module):
                     self.video_num_layers,
                 ),
                 1.0 / self.video_num_layers,
+                device=action_reference.device,
+                dtype=action_reference.dtype,
             )
         )
         self.mot_checkpoint_mixed_attn = bool(mot_checkpoint_mixed_attn)

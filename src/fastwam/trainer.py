@@ -51,6 +51,8 @@ class Wan22Trainer:
         self.save_training_state = bool(cfg.get("save_training_state", True))
         
         self.resume = cfg.resume
+        self.resume_epoch = int(cfg.get("resume_epoch", 0))
+        self.resume_global_step = int(cfg.get("resume_global_step", 0))
         self.mixed_precision = str(cfg.mixed_precision).strip().lower()
         if self.mixed_precision not in {"no", "fp16", "bf16"}:
             raise ValueError(
@@ -311,7 +313,16 @@ class Wan22Trainer:
             raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
         logger.info("Loading weight checkpoint only: %s", resume)
         self.accelerator.unwrap_model(self.model).load_checkpoint(str(resume_path), optimizer=None)
+        self.global_step = self.resume_global_step
+        self.epoch = self.resume_epoch
+        self.batch_in_epoch = 0
+        self.train_sampler.set_epoch(self.epoch)
         logger.warning("Loaded .pt weights only; optimizer/scheduler/step were not restored under ZeRO2.")
+        logger.info(
+            "Continuing weight-only run from epoch=%d step=%d.",
+            self.epoch,
+            self.global_step,
+        )
 
     def _set_dit_only_train_mode(self):
         # Match DiffSynth's freeze_except("dit"): only DiT stays trainable/in-train-mode.
@@ -717,6 +728,7 @@ class Wan22Trainer:
                 self.epoch += 1
                 self.batch_in_epoch = 0
                 self.train_sampler.clear_resume_batch_offset()
+                self.train_sampler.set_epoch(self.epoch)
                 if self.epoch in self.save_epochs:
                     ckpt_info = self.save_checkpoint(tag=f"epoch_{self.epoch:03d}")
                     if self.accelerator.is_main_process:
